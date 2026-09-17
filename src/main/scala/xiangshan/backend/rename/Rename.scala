@@ -114,7 +114,10 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
 
   val compressUnit = Module(new CompressUnit())
   // create free list and rat
-  val intFreeList = Module(new StdFreeList(IntPhyRegs - 1, IntLogicRegs, Reg_I, RabCommitWidth, IntLogicRegs, false))
+  // Integer RAT aliases all logical registers to p0 at reset, so p1 is the
+  // first free physical register. Keep the integer-specific arch-full check
+  // disabled because this aliasing layout is not a one-to-one RAT mapping.
+  val intFreeList = Module(new StdFreeList(IntPhyRegs - 1, 1, Reg_I, RabCommitWidth, IntLogicRegs, false))
   val fpFreeList = Module(new StdFreeList(FpPhyRegs - FpLogicRegs, FpLogicRegs, Reg_F, RabCommitWidth, FpLogicRegs))
   val vecFreeList = Module(new StdFreeList(VfPhyRegs - VecLogicRegs, VecLogicRegs, Reg_V, RabCommitWidth, VecStdLogicRegs))
   val vlFreeList = Module(new StdFreeList(VlPhyRegs - VlLogicRegs, VlLogicRegs, Reg_Vl, RabCommitWidth, VlLogicRegs))
