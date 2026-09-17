@@ -264,8 +264,26 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   when(predictors.map(_.io.sramResetDone).reduce(_ && _)) {
     sramResetDone := true.B
   }
-  s0_fire := s1_ready && sramResetDone
-  s1_fire := s1_valid && s2_ready && io.toFtq.prediction.ready
+  // A predictor can ask to hold the predict stage for one cycle (see BasePredictorIO.holdPredict).
+  // The hold freezes the s0/s1 pair, i.e. it makes the pipeline look exactly like the existing
+  // backpressure stall (s1 not ready because the FTQ is not ready): s1 keeps its block, and s0 -
+  // with no new read issued - is held as well.  This pair must never split: `s1_ready` is
+  // `s1_fire || !s1_valid || s1_flush` and `s0_fire = s1_ready && ...`, so in normal operation
+  // s1 can only fire when s0 fires too, and modules keeping per-stage bookkeeping (e.g. the
+  // CommonHR history queue advances `enqPtr`/`predPtr` on s0_fire and `writePtr`/`recoverPtr` on
+  // s3_fire) rely on that.  Freezing s0 alone would let the s1 block drain into s2/s3 while s0
+  // feeds nothing, which breaks their pointer windows.
+  // The FTQ-visible `valid` of the normal path must be gated together with s1_fire: s1 keeps its
+  // block, so if the FTQ were still allowed to take it (`valid && ready`), it would receive the
+  // very same prediction again next cycle.  Overrides are left alone - they are a one-cycle
+  // correction of an older entry, dispatched from s2/s3, so the held s1 block cannot duplicate
+  // them.
+  // `s0_stall` is deliberately left alone: it describes where the startPc comes from, so a new
+  // startPc (s1 target / redirect / override) is still captured into s0_startPcReg while held and
+  // the very same block is issued again next cycle.
+  private val predictorHoldPredict = predictors.flatMap(_.io.holdPredict).foldLeft(false.B)(_ || _)
+  s0_fire := s1_ready && sramResetDone && !predictorHoldPredict
+  s1_fire := s1_valid && s2_ready && io.toFtq.prediction.ready && !predictorHoldPredict
   s2_fire := s2_valid && s3_ready
   s3_fire := s3_valid
 
@@ -513,7 +531,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   println(s"bpu commit meta width: ${s3_commitMeta.getWidth}")
 
   /* *** bpu to ftq io *** */
-  io.toFtq.prediction.valid := s1_valid && s2_ready || s2_override || s3_override
+  io.toFtq.prediction.valid := (s1_valid && s2_ready && !predictorHoldPredict) || s2_override || s3_override
   when(s3_override) {
     io.toFtq.prediction.bits.fromStage(s3_startPc.get, s3_prediction)
   }.elsewhen(s2_override) {
@@ -720,6 +738,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   /* *** perf pred *** */
 
   XSPerfAccumulate("toFtqFire", io.toFtq.prediction.fire)
+  // cycles the predict stage was frozen by a predictor request (a fetch bubble, see holdPredict)
+  XSPerfAccumulate("predictHold", sramResetDone && predictorHoldPredict)
   XSPerfAccumulate("s2Override", io.toFtq.prediction.fire && io.toFtq.prediction.bits.s2Override)
   XSPerfAccumulate("s3Override", io.toFtq.prediction.fire && io.toFtq.prediction.bits.s3Override)
   XSPerfHistogram(

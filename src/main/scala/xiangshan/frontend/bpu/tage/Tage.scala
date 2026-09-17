@@ -36,12 +36,17 @@ import xiangshan.frontend.bpu.TageTableInfo
  */
 class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters with TopHelper with HalfAlignHelper {
   class TageIO(implicit p: Parameters) extends BasePredictorIO {
+    // control
+    override val holdPredict: Option[Bool] = Option(Output(Bool()))
+
     val fromPhr:     PhrToTageIO     = new PhrToTageIO
     val fromMainBtb: MainBtbToTageIO = new MainBtbToTageIO
     val toSc:        TageToScIO      = new TageToScIO
     val prediction:  TagePrediction  = Output(new TagePrediction)
     val meta:        TageMeta        = Output(new TageMeta)
 
+    // train.valid; used for perf counters and to qualify the holdPredict request (it must stay
+    // independent of train.ready, see the holdPredict comment)
     val debug_trainValid: Bool = Input(Bool())
   }
   val io: TageIO = IO(new TageIO)
@@ -239,9 +244,37 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val t0_needReadAlt        = false.B
   private val t0_useMeta            = !t0_needRead
 
-  private val t0_readBankConflict = t0_hasCond && t0_needRead && s0_fire && t0_bankIdx === s0_bankIdx
-  // Training reads now arbitrate ahead of prediction reads.  Do not hold the
-  // training stream behind a same-bank prediction request.
+  // The training read (readReq(1)) and the prediction read (readReq(0)) want the same bank this
+  // cycle, and the single-ported SRAM can only serve one of them.
+  //
+  // The training read keeps the bank (see io.trainReady below), but instead of dropping the
+  // prediction read of that bank - which loses the TAGE lookup of the whole fetch block - the BPU
+  // predict stage is held for one cycle: the same startPc is read again next cycle, when the
+  // training read is done and the bank is free.  The whole block is re-issued, so the set index,
+  // the tags and the folded history all stay consistent (`pc` does not change while the predict
+  // stage is held, and the bank index depends only on pc).
+  //
+  // The request is qualified with `io.debug_trainValid` (= `train.valid`) and deliberately not
+  // with `io.stageCtrl.t0_fire` (= `train.fire` = `train.valid && train.ready`): `train.ready` is
+  // the AND of every predictor's trainReady and Sc derives its own from `s0_fire`, so using the
+  // fire here would close a combinational cycle
+  //   s0_fire -> Sc.trainReady -> train.ready -> train.fire -> holdPredict -> s0_fire.
+  // `train.valid` comes straight out of an FTQ register.  Raising the hold cannot leave the
+  // training stream waiting for nothing: the only predictor that ever holds it back is Sc, and
+  // Sc's conflict condition also requires `s0_fire`, so the hold itself clears it and the training
+  // read is issued in this very cycle, with the prediction read suppressed.
+  private val t0_samePredictionBank = t0_bankIdx === s0_bankIdx
+  private val t0_readBankConflict   = t0_hasCond && t0_needRead && t0_samePredictionBank
+  io.holdPredict.get := io.enable && io.debug_trainValid && t0_needRead && t0_samePredictionBank
+  // The BPU must honour the hold, otherwise this cycle would issue a prediction read that the
+  // training read takes the bank from (and the TAGE lookup of the block would be lost).  The same
+  // property is asserted again at the SRAM level, one assert per bank, in TageTable.
+  assert(
+    !(s0_fire && io.holdPredict.get),
+    "prediction read and training read want the same bank: the predict stage must be held"
+  )
+  // Training reads arbitrate ahead of prediction reads; do not hold the training stream behind a
+  // same-bank prediction request (the predict side is held instead, see above).
   io.trainReady := true.B
 
   // t0_readBankConflict can be high even there's no train.valid, causing perf counters to be inaccurate
@@ -289,6 +322,15 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val debug_readBankConflictShortLoopReg = RegNext(debug_readBankConflictShortLoop)
   private val debug_readBankConflictShortLoopNeg = !debug_readBankConflictShortLoop & debug_readBankConflictShortLoopReg
   private val debug_readBankConflictShortLoopDistCnt = RegInit(0.U(4.W))
+  // only for perf: how many cycles in a row the predict stage is held for a bank conflict
+  private val debug_holdPredictReg     = RegNext(io.holdPredict.get, init = false.B)
+  private val debug_holdPredictNeg     = !io.holdPredict.get && debug_holdPredictReg
+  private val debug_holdPredictDistCnt = RegInit(0.U(4.W))
+  debug_holdPredictDistCnt := Mux(
+    debug_holdPredictNeg,
+    0.U,
+    Mux(io.holdPredict.get, debug_holdPredictDistCnt + 1.U, debug_holdPredictDistCnt)
+  )
   // dist cnt
   debug_readBankConflictShortLoopDistCnt := Mux(
     debug_readBankConflictShortLoopNeg,
@@ -895,6 +937,17 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
     "read_conflict_bubble_dist",
     debug_readBankConflictDistCnt,
     debug_readBankConflictNeg,
+    0,
+    16
+  )
+  /*
+  how long the predict stage is held so that a training read can keep the bank
+  sum -> total cycles held, sampled -> number of completed holds, mean -> mean hold length
+   */
+  XSPerfHistogram(
+    "predict_hold_dist",
+    debug_holdPredictDistCnt,
+    debug_holdPredictNeg,
     0,
     16
   )

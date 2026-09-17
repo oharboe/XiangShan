@@ -120,6 +120,14 @@ class TageTable(
   entrySram.zip(usefulCtrSram).zipWithIndex.foreach { case ((entryBank, usefulBank), bankIdx) =>
     val predictionRead = io.readReq(0).valid && io.readReq(0).bits.bankMask(bankIdx)
     val trainingRead   = io.readReq(1).valid && io.readReq(1).bits.bankMask(bankIdx)
+    // The single-ported SRAM can only serve one read per bank, so the prediction read and the
+    // training read must never ask for the same bank in the same cycle.  When they would, the BPU
+    // holds the whole predict stage for one cycle (see Tage) and this block is read again next
+    // cycle, which is why the prediction read can no longer be suppressed by a training read here.
+    assert(
+      !(predictionRead && trainingRead),
+      s"tage_table_${tableIdx} bank_${bankIdx}: prediction read and training read use the same bank"
+    )
     // Training reads have priority over prediction reads. The SRAM is
     // single-ported, so a simultaneous prediction read is suppressed and the
     // caller uses its write-buffer/MBTB fallback path.
@@ -184,7 +192,7 @@ class TageTable(
 
   // write entry to sram from write buffer
   entrySram.zip(entryWriteBuffers).zipWithIndex.foreach { case ((bank, bankBuffers), bankIdx) =>
-    bank.zip(bankBuffers).foreach { case (way, buffer) =>
+    bank.zip(bankBuffers).zipWithIndex.foreach { case ((way, buffer), wayIdx) =>
       val bufferOut      = buffer.io.read.head
       val trainingRead   = io.readReq(1).valid && io.readReq(1).bits.bankMask(bankIdx)
       val predictionRead = io.readReq(0).valid && io.readReq(0).bits.bankMask(bankIdx)
@@ -196,6 +204,13 @@ class TageTable(
         1.U(1.W) // way mask
       )
       bufferOut.ready := way.io.w.req.ready && writeGrant
+      // The SRAM is single ported: a write in the same cycle silently drops the read.  The write
+      // drain therefore gives the port up whenever a read is granted, and only writes in a cycle
+      // whose prediction read was suppressed by a full write buffer.
+      assert(
+        !(way.io.r.req.valid && way.io.w.req.valid),
+        s"tage_table_${tableIdx} bank_${bankIdx} way_${wayIdx}: SRAM read and write in the same cycle"
+      )
     }
   }
 
