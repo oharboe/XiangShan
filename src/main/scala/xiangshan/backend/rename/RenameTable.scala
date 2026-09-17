@@ -95,7 +95,7 @@ class RenameTable(reg_t: RegType, numDiffWritePorts: Int)(implicit p: Parameters
   // speculative rename table
   val rename_table_init = reg_t match {
     case Reg_I => VecInit.fill    (IntLogicRegs)(0.U(PhyRegIdxWidth.W))
-    case Reg_F => VecInit.tabulate(FpLogicRegs)(_.U(PhyRegIdxWidth.W))
+    case Reg_F => VecInit.fill    (FpLogicRegs)(0.U(PhyRegIdxWidth.W))
     case Reg_V => VecInit.tabulate(VecLogicRegs)(_.U(PhyRegIdxWidth.W))
     case Reg_Vl => VecInit.tabulate(VlLogicRegs)(_.U(PhyRegIdxWidth.W))
   }
@@ -106,6 +106,7 @@ class RenameTable(reg_t: RegType, numDiffWritePorts: Int)(implicit p: Parameters
   val arch_table_next = WireDefault(arch_table)
   // old_pdest
   val old_pdest = RegInit(VecInit.fill(RabCommitWidth)(0.U(PhyRegIdxWidth.W)))
+  val old_pdest_valid = RegNext(VecInit(io.archWritePorts.map(_.wen)), VecInit.fill(RabCommitWidth)(false.B))
   val need_free = RegInit(VecInit.fill(RabCommitWidth)(false.B))
 
   // For better timing, we optimize reading and writing to RenameTable as follows:
@@ -157,9 +158,11 @@ class RenameTable(reg_t: RegType, numDiffWritePorts: Int)(implicit p: Parameters
   arch_table := arch_table_next
 
   for (((old, free), i) <- (old_pdest zip need_free).zipWithIndex) {
-    val hasDuplicate = old_pdest.take(i).map(_ === old)
+    val hasDuplicate = old_pdest.take(i).zip(old_pdest_valid.take(i)).map { case (pdest, valid) => valid && pdest === old }
     val blockedByDup = if (i == 0) false.B else VecInit(hasDuplicate).asUInt.orR
-    free := VecInit(arch_table.map(_ =/= old)).asUInt.andR && !blockedByDup
+    // Unlike integer p0, floating-point p0 can be freed. Invalid commit lanes
+    // also carry old_pdest = 0, so they must not request or block a free.
+    free := old_pdest_valid(i) && VecInit(arch_table.map(_ =/= old)).asUInt.andR && !blockedByDup
   }
 
   io.old_pdest := old_pdest
@@ -208,6 +211,7 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
     val vec_old_pdest = Vec(RabCommitWidth, Output(UInt(PhyRegIdxWidth.W)))
     val vl_old_pdest = Vec(RabCommitWidth, Output(UInt(PhyRegIdxWidth.W)))
     val int_need_free = Vec(RabCommitWidth, Output(Bool()))
+    val fp_need_free = Vec(RabCommitWidth, Output(Bool()))
     val snpt = Input(new SnapshotPort)
 
     // for debug assertions
@@ -280,6 +284,7 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
   fpRat.io.redirect := io.redirect
   fpRat.io.snpt := io.snpt
   io.fp_old_pdest := fpRat.io.old_pdest
+  io.fp_need_free := fpRat.io.need_free
 
   for ((arch, i) <- fpRat.io.archWritePorts.zipWithIndex) {
     arch.wen  := io.rabCommits.isCommit && io.rabCommits.commitValid(i) && io.rabCommits.info(i).fpWen

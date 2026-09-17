@@ -118,7 +118,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   // first free physical register. Keep the integer-specific arch-full check
   // disabled because this aliasing layout is not a one-to-one RAT mapping.
   val intFreeList = Module(new StdFreeList(IntPhyRegs - 1, 1, Reg_I, RabCommitWidth, IntLogicRegs, false))
-  val fpFreeList = Module(new StdFreeList(FpPhyRegs - FpLogicRegs, FpLogicRegs, Reg_F, RabCommitWidth, FpLogicRegs))
+  val fpFreeList = Module(new StdFreeList(FpPhyRegs - 1, 1, Reg_F, RabCommitWidth, FpLogicRegs, false))
   val vecFreeList = Module(new StdFreeList(VfPhyRegs - VecLogicRegs, VecLogicRegs, Reg_V, RabCommitWidth, VecStdLogicRegs))
   val vlFreeList = Module(new StdFreeList(VlPhyRegs - VlLogicRegs, VlLogicRegs, Reg_Vl, RabCommitWidth, VlLogicRegs))
 
@@ -130,6 +130,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   val vlRenamePorts  = Wire(Vec(RenameWidth, new RatWritePort(log2Ceil(VlLogicRegs))))
 
   val int_need_free = Wire(Vec(RabCommitWidth, Bool()))
+  val fp_need_free = Wire(Vec(RabCommitWidth, Bool()))
   val int_old_pdest = Wire(Vec(RabCommitWidth, UInt(PhyRegIdxWidth.W)))
   val fp_old_pdest  = Wire(Vec(RabCommitWidth, UInt(PhyRegIdxWidth.W)))
   val vec_old_pdest = Wire(Vec(RabCommitWidth, UInt(PhyRegIdxWidth.W)))
@@ -219,6 +220,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   }
 
   int_need_free := rat.io.int_need_free
+  fp_need_free := rat.io.fp_need_free
   int_old_pdest := rat.io.int_old_pdest
   fp_old_pdest := rat.io.fp_old_pdest
   vec_old_pdest := rat.io.vec_old_pdest
@@ -821,8 +823,8 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     // II. Free List Update
     intFreeList.io.freeReq(i) := int_need_free(i)
     intFreeList.io.freePhyReg(i) := RegNext(int_old_pdest(i))
-    fpFreeList.io.freeReq(i)  := GatedValidRegNext(commitValid && needDestRegCommit(Reg_F, io.rabCommits.info(i)))
-    fpFreeList.io.freePhyReg(i) := fp_old_pdest(i)
+    fpFreeList.io.freeReq(i) := fp_need_free(i)
+    fpFreeList.io.freePhyReg(i) := RegNext(fp_old_pdest(i))
     vecFreeList.io.freeReq(i)  := GatedValidRegNext(commitValid && needDestRegCommit(Reg_V, io.rabCommits.info(i)))
     vecFreeList.io.freePhyReg(i) := vec_old_pdest(i)
     vlFreeList.io.freeReq(i) := GatedValidRegNext(io.vlCommits.isCommit && io.vlCommits.commitValid(i))

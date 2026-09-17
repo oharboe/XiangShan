@@ -61,7 +61,7 @@ object DiffRatState {
     val state = Wire(new DiffRatState(params))
     val pregWidth = state.intRat.head.getWidth
     state.intRat := VecInit.fill(params.intEntries)(0.U(pregWidth.W))
-    state.fpRat := VecInit.tabulate(params.fpEntries)(_.U(pregWidth.W))
+    state.fpRat := VecInit.fill(params.fpEntries)(0.U(pregWidth.W))
     state.vecRat := VecInit.tabulate(params.vecEntries)(_.U(pregWidth.W))
     state.vlRat := VecInit.tabulate(params.vlEntries)(_.U(pregWidth.W))
     state
